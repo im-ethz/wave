@@ -59,11 +59,11 @@ kfold_manual <- function(cvmodel, n_folds, pca_features, data_training = NULL, d
 
 # Estimation of time-dependent ROC and AUROC
 library(ROCR)
-source("utils/performance/NNE-estimate.q")
-source("utils/performance/NNE-CrossValidation.q")
-source("utils/performance/interpolate.q")
-source("utils/performance/dynamicTP.q")
-source("utils/performance/NNE-estimate_TPR.q")
+source("utils/performance/NNE-estimate.R")
+source("utils/performance/NNE-CrossValidation.R")
+source("utils/performance/interpolate.R")
+source("utils/performance/dynamicTP.R")
+source("utils/performance/NNE-estimate_TPR.R")
 source("utils/performance/dynamicIntegrateAUC.R")
 
 # Mean rank function
