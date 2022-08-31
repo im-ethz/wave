@@ -34,6 +34,8 @@ This repository contains the code used for the statistical analysis and modeling
 - [Preprocessing](preprocessing)
 - [Utility functions](utils)
 
+The Bayesian survival models were implemented using the package brms, which interfaces to stan, see [here](https://github.com/paul-buerkner/brms) and [here](https://mc-stan.org/). The utility functions for performance evaluation using the time-dependent AUROC are based on code by Bansal and Heagerty, see [here](https://github.com/aasthaa/meanrankROC_package).
+
 ## Citation
 If using parts of this code in your work, please consider citing the corresponding [paper](https://doi.org/10.2196/35717):
 
