@@ -1,0 +1,53 @@
+---
+title: "Seasonality analysis"
+---
+
+# Preparation
+```{r, message=F}
+source("setup.R")
+source("preprocessing/preparation.R")
+```
+
+# Data
+```{r, message=F}
+zero_crossings <- read_csv("../data/zero_crossings.csv")
+
+physiological_features <- read_csv("../data/wave_features_5min.csv") %>%
+  relocate(datetime, ID) %>%
+  arrange(ID, datetime)
+```
+
+# Daily variation of physiological measurements and body movements
+
+Figure 6
+```{r}
+covariates <- c("HEART_RATE_mean", "RESPIRATION_mean", "hrv_rmssd", "ZERO_CROSSING_ENERGYTOTAL")
+plotcolors <- c("#E64B35FF", "#4DBBD5FF", "#3C5488FF", "black")
+
+physiological_features %>%
+  mutate(time_of_day = as_hms(floor_date(datetime, unit = "5minutes")), hour_of_day = as_hms(ceiling_date(datetime, unit = "1 hour")), .after = datetime) %>%
+  filter(!(ID %in% c(icu_patients, dropouts))) %>%
+  left_join(zero_crossings, by = c("ID", "time_of_day")) %>%
+  mutate(across(all_of(covariates), scale), .groups = "drop") %>%
+  group_by(hour_of_day, time_of_day) %>%
+  summarize(across(all_of(covariates), mean, na.rm = T), .groups = "drop") %>%
+  arrange(hour_of_day) %>%
+  pivot_longer(all_of(covariates)) %>%
+  group_by(hour_of_day, name) %>%
+  summarize(across(value, list(mean = mean, sd = sd), na.rm = T), .groups = "drop") %>%
+  mutate(name = factor(name, levels = covariates, labels = c("Mean~HR[]", "Mean~HRV~NN[]", "Mean~RF[]", "Body~movement[]"))) %>%
+  ggplot(aes(x = hour_of_day, y = value_mean, color = name, fill = name)) +
+  annotate("rect", xmin = as_hms("0:00:00"), xmax = as_hms("5:00:00"), ymin = -2, ymax = 2, fill = "grey", alpha = 0.3) +
+  geom_linerange(aes(ymin = value_mean - value_sd, ymax = value_mean + value_sd), alpha = 0.7) +
+  geom_line(aes(y = value_mean), linetype = "longdash", size = 0.7) +
+  theme_bw() +
+  xlab("Time of day") +
+  ylab("Z-score") +
+  coord_cartesian(ylim = c(-0.65, 0.75)) +
+  scale_x_time(breaks = hms(hours = seq(2, 24, 4)), labels = function(x) str_extract(x, pattern = "\\d\\d:\\d\\d"), expand = expansion(add = c(0, 0))) +
+  scale_color_manual(name = "Physiological measure", values = plotcolors, labels = expression(HR[], HRV[], RF[], Body ~ movement[])) +
+  scale_fill_manual(name = "Physiological measure", values = plotcolors, labels = expression(HR[], HRV[], RF[], Body ~ movement[])) +
+  theme(legend.position = "top", text = element_text(family = "Times New Roman"))
+
+ggsave("figures/seasonality_joint_errorbars.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
