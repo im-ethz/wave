@@ -1,0 +1,476 @@
+---
+title: "Statistical analysis"
+author: "Adrian Lison"
+---
+
+This notebook contains the main statistical analysis conducted in Föll, Lison, Maritsch et al. 2022.
+
+# Preparation
+```{r, message=F}
+source("setup.R")
+knitr::purl("preprocessing/preparation.Rmd", "preprocessing/preparation.R")
+source("preprocessing/preparation.R")
+
+source("utils/utils.R")
+source("utils/utils_performance.R")
+source("utils/utils_plot.R")
+```
+
+# Descriptives
+Patients
+```{r}
+cat(paste("Overall cohort:", length(surv_data %>% pull(ID) %>% unique()) + length(exclude)))
+
+cat(paste0(
+  "\nExcluded: ", length(exclude), "\n  ",
+  length(exclude_negative), " due to negative test\n  ",
+  length(exclude_measurement), " due to nonadherence to the prescribed measurement regime\n  ",
+  length(exclude_short_stay), " due to hospital discharge on the same day of hospitalization"
+))
+
+cat(paste("\nIncluded in analysis:", length(surv_data %>% filter(!(ID %in% exclude)) %>% pull(ID) %>% unique())))
+
+cat("\n ", length(icu_patients), "ICU patients")
+cat("\n ", length(surv_data %>% filter(!(ID %in% c(exclude, icu_patients, dropouts))) %>% pull(ID) %>% unique()), "Discharged patients")
+cat("\n ", length(dropouts), "Censored drop-outs")
+```
+Observations
+```{r}
+# Original number of observations:
+cat("Number of observations before quality checks:", surv_data %>%
+  filter(!(ID %in% exclude)) %>%
+  nrow())
+
+# Number of observations after application of all quality criteria
+cat("\nNumber of observations after quality checks:", surv_data %>%
+  filter(!(ID %in% exclude)) %>%
+  ensure_quality_observations(observation_coverage = observation_coverage, coverage_factor = coverage_factor) %>%
+  nrow())
+```
+Demographics
+```{r}
+demographics %>%
+  filter(ID %in% (surv_data %>%
+    filter(if_any(c(HEART_RATE_mean, hrv_mean_hr), ~ !is.na(.))) %>%
+    pull(ID) %>%
+    unique())) %>%
+  mutate(outcome = case_when(ID %in% icu_patients ~ "icu", ID %in% dropouts ~ "dropout", T ~ "dismissed")) %>%
+  group_by(outcome) %>%
+  summarize(across(age, list(mean = mean, sd = sd, min = min, max = max)),
+    sex_male = sum(sex == "male"),
+    sex_female = sum(sex == "female"),
+    n = n()
+  )
+```
+
+# Explanatory Analysis
+
+## Physiological features
+```{r}
+statistical_feature_prefixes <- c("_max", "_mean", "_min", "_rms", "pct_95", "pct_5", "_iqr", "_iqr_5_95", "_std", "_entropy", "_n_above_mean", "_n_below_mean", "_energy")
+hrv_feature_names <- c("hrv_mean_nni", "hrv_median_nni", "hrv_range_nni", "hrv_sdsd", "hrv_rmssd", "hrv_nni_50", "hrv_pnni_50", "hrv_nni_20", "hrv_pnni_20", "hrv_cvsd", "hrv_sdnn", "hrv_cvnni", "hrv_total_power", "hrv_vlf", "hrv_lf", "hrv_hf", "hrv_lf_hf_ratio", "hrv_lfnu", "hrv_hfnu")
+
+predictors <- surv_data %>%
+  select(
+    starts_with(c("HEART_RATE", "RESPIRATION")) & ends_with(statistical_feature_prefixes),
+    all_of(hrv_feature_names)
+  ) %>%
+  names()
+```
+
+## Model fitting
+```{r}
+for (predictor in predictors) {
+  model_formula <- as.formula(paste("event ~ 1 + (1 | ID) + rel_day + age + sex +", predictor))
+
+  model_data <- surv_data %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day)) %>%
+    drop_na(all.vars(model_formula))
+
+  prior_univar <- prior(normal(0, 1), class = "b") +
+    prior(normal(0, 5), class = "Intercept") +
+    prior(normal(0, 1), class = "b", coef = "rel_day") +
+    prior(student_t(3, 0, 1), class = "sd", group = "ID")
+
+  model <- brm(model_formula,
+    data = model_data,
+    family = cumulative(link = "cloglog", threshold = "flexible"),
+    prior = prior_univar,
+    control = list(adapt_delta = 0.9),
+    file = paste0("models/main/explanatory_", predictor),
+    file_refit = "on_change"
+  )
+}
+```
+
+## Association with patient outcomes
+Load fitted models and arrange data
+```{r}
+m_fits <- bind_rows(lapply(predictors, function(predictor) {
+  if (file.exists(paste0("models/main/explanatory_", predictor, ".rds"))) {
+    model <- readRDS(paste0("models/main/explanatory_", predictor, ".rds"))
+    return(model %>% gather_draws(!!as.name(paste0("b_", predictor)), regex = T))
+  } else {
+    print(paste(predictor, "does not exist."))
+    return(data.frame())
+  }
+})) %>%
+  mutate(.variable = str_remove(.variable, "b_"))
+
+m_fits_ranks_hybrid <- m_fits %>%
+  group_by(.variable) %>%
+  summarize(.value = quantile(.value, 0.1), .groups = "drop") %>%
+  mutate(rank = min_rank(.value))
+
+m_fits_plotdata <- m_fits %>%
+  left_join(m_fits_ranks_hybrid %>% select(.variable, rank), by = ".variable") %>%
+  mutate(measure_type = case_when(
+    str_contains(.variable, "HEART_RATE_") ~ "HEART_RATE",
+    str_contains(.variable, "RESPIRATION_") ~ "RESPIRATION",
+    str_contains(.variable, "hrv_") ~ "HRV",
+    str_contains(.variable, "num_ibis") ~ "HRV",
+    T ~ "other"
+  )) %>%
+  ungroup() %>%
+  mutate(.variable.name = str_remove(.variable, paste0(measure_type, "_")), .variable = reorder(.variable, rank, order = T)) %>%
+  arrange(measure_type, .variable)
+```
+
+Figure 3
+```{r,fig.height=5,fig.width=8}
+plot_grid(
+  plotlist = lapply(c("HEART_RATE", "HRV", "RESPIRATION"), get_univar_plot),
+  ncol = 3, align = "v", labels = letters[1:3], label_fontfamily = "Times New Roman"
+)
+
+ggsave("figures/explanatory_coef.png", width = 15, height = 7.5, units = "cm", dpi = 300)
+```
+
+# Development of the Risk Score
+
+## Selection of physiological features
+```{r}
+significant_features <- m_fits %>%
+  group_by(.variable) %>%
+  select(.variable, .value) %>%
+  mean_qi(.width = 0.8) %>%
+  filter(.lower > 0 | .upper < 0) %>%
+  pull(.variable)
+
+significant_features
+```
+
+## Principal component analysis (PCA)
+Compute principal components (PCs)
+```{r}
+PCA_observations <- observation_coverage %>%
+  filter(HEART_RATE_n_obs >= coverage_factor & RESPIRATION_n_obs >= coverage_factor & hrv_n_windows_notna >= coverage_factor) %>%
+  select(ID, rel_day)
+cl_pc <- prcomp(surv_data %>% inner_join(PCA_observations, by = c("ID", "rel_day")) %>% select(all_of(significant_features)) %>% drop_na(), scale. = TRUE)
+summary(cl_pc)
+```
+
+Save PCs into data frame for further analysis
+```{r}
+surv_data_PCs <- surv_data %>%
+  inner_join(PCA_observations, by = c("ID", "rel_day")) %>%
+  select(ID, datetime, rel_day, event, age, sex, all_of(significant_features)) %>%
+  drop_na() %>%
+  select(ID, datetime, rel_day, event, age, sex) %>%
+  bind_cols(data.frame(cl_pc$x)) %>%
+  mutate(across(starts_with("PC"), scale)) %>%
+  left_join(surv_data, by = c("ID", "rel_day", "event", "age", "sex"))
+```
+
+```{r}
+saveRDS(surv_data_PCs, file = "../data/main/pca/data_pca.rds")
+```
+
+## LASSO feature selection
+
+Load data from the PCA
+```{r}
+surv_data_PCs <- readRDS("../data/main/pca/data_pca.rds")
+```
+
+Select PC features via LASSO
+```{r}
+# Features for the main risk score
+get_PCs_LASSO(surv_data_PCs)
+
+# Features for the fixed risk score (no update of physiological data, see performance evaluation)
+get_PCs_LASSO(
+  surv_data_PCs %>%
+    group_by(ID) %>%
+    filter(min(rel_day) == 1) %>%
+    mutate(across(starts_with("PC"), ~ .[1])) %>%
+    ungroup()
+)
+```
+## Computation of risk score
+```{r}
+risk_score_formula <- event ~ 1 + (1 | ID) + rel_day + age + sex + PC1 + PC11 + PC12 + PC18 + PC2 + PC20 + PC21 + PC3
+
+prior_multivar <- prior(normal(0, 1), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "rel_day") +
+  prior(student_t(3, 0, 1), class = "sd", group = "ID")
+
+risk_score_observations <- observation_coverage %>%
+  filter(HEART_RATE_n_obs >= coverage_factor & RESPIRATION_n_obs >= coverage_factor & hrv_n_windows_notna >= coverage_factor) %>%
+  select(ID, rel_day)
+
+risk_score_data <- surv_data_PCs %>%
+  inner_join(risk_score_observations, by = c("ID", "rel_day")) %>%
+  mutate(rel_day = scale(rel_day)) %>%
+  drop_na(all.vars(risk_score_formula))
+
+risk_score_model <- brm(
+  risk_score_formula,
+  data = risk_score_data,
+  family = cumulative(link = "cloglog", threshold = "flexible"),
+  chains = 4, inits = 0,
+  prior = prior_multivar,
+  file = "models/main/risk_score", file_refit = "on_change"
+)
+```
+
+Figure 4
+```{r}
+risk_score_probs <- risk_score_model %>%
+  spread_draws(b_Intercept[i]) %>%
+  pivot_wider(.draw, names_from = i, values_from = b_Intercept, names_prefix = "tau") %>%
+  mutate(ind = 1) %>%
+  inner_join(data.frame(ind = 1, pred = seq(-3, 3, 0.1)), by = "ind") %>%
+  select(-ind) %>%
+  mutate(
+    discharge_prob = discharge_prob(pred, tau1, tau2),
+    stay_prob = stay_prob(pred, tau1, tau2),
+    icu_prob = icu_prob(pred, tau1, tau2)
+  ) %>%
+  pivot_longer(ends_with("_prob"))
+
+get_probability_plot(risk_score_probs)
+
+ggsave("figures/risk_score_probs.png", height = 9.375, width = 15, units = "cm", dpi = 300)
+```
+
+Figure 7 (Multimedia Appendix)
+```{r,fig.width=12,fig.height=4}
+# plot coefficients
+pc_lasso_effects_plot <- risk_score_model %>% get_multivar_plot()
+
+# plot PCA loadings
+PC_direction <- tribble(
+  ~PC, ~direc,
+  "PC1", 1,
+  "PC11", 1,
+  "PC12", -1,
+  "PC18", -1,
+  "PC2", 1,
+  "PC20", 1,
+  "PC21", 1,
+  "PC3", 1,
+)
+
+pc_loadings_df <- data.frame(cl_pc$rotation) %>%
+  rownames_to_column() %>%
+  select(rowname, PC1, PC11, PC12, PC18, PC2, PC20, PC21, PC3) %>%
+  pivot_longer(-rowname, names_to = "PC") %>%
+  rename(feature = rowname) %>%
+  mutate(measure_type = case_when(
+    str_detect(feature, "HEART_RATE_") ~ "HEART_RATE",
+    str_detect(feature, "RESPIRATION_") ~ "RESPIRATION",
+    str_detect(feature, "hrv_") ~ "HRV",
+    str_detect(feature, "num_ibis") ~ "HRV",
+    T ~ "other"
+  )) %>%
+  mutate(feature.name = str_remove(feature, "HEART_RATE_|RESPIRATION_|hrv_")) %>%
+  mutate(feature.name = factor(feature.name, ordered = T, levels = rev(c("max", "mean", "min", "rms", "pct_95", "pct_5", "energy", "iqr", "iqr_5_95", "std", "entropy", "perm_entropy", "svd_entropy", "n_above_mean", "n_below_mean", "mean_nni", "median_nni", "range_nni", "sdsd", "rmssd", "nni_50", "pnni_50", "nni_20", "pnni_20", "cvsd", "sdnn", "cvnni", "total_power", "vlf", "lf", "hf", "lf_hf_ratio", "lfnu", "hfnu")))) %>%
+  left_join(PC_direction, by = "PC") %>%
+  mutate(direction_influence = value * direc > 0) %>%
+  mutate(PC = factor(PC, ordered = T, levels = PC_direction$PC)) %>%
+  mutate(measure_type = str_replace(measure_type, "_", " "))
+
+pc_loadings_plot <- get_loadings_plot(pc_loadings_df)
+
+# Combine plots
+plots <- align_plots(pc_lasso_effects_plot, pc_loadings_plot, align = "v", axis = "lr")
+plot_grid(white_plot, plots[[1]], white_plot, plots[[2]], ncol = 2, rel_heights = c(0.6, 1), rel_widths = c(0.03, 0.97), labels = c("", "a", "", "b"))
+
+ggsave("figures/risk_score_loadings.png", height = 13, width = 15, units = "cm", dpi = 300)
+```
+
+# Performance Evaluation
+
+## Data and model preparation
+```{r}
+cv_observations <- observation_coverage %>%
+  filter(HEART_RATE_n_obs >= coverage_factor & RESPIRATION_n_obs >= coverage_factor & hrv_n_windows_notna >= coverage_factor) %>%
+  select(ID, rel_day)
+```
+
+Main risk score model (with updating)
+```{r}
+# Train
+cv_data_update_train <- surv_data %>%
+  inner_join(cv_observations, by = c("ID", "rel_day")) %>%
+  drop_na(all_of(significant_features)) %>%
+  arrange(ID, rel_day)
+
+# Test
+cv_data_update_test <- surv_data %>%
+  drop_na(all_of(significant_features)) %>%
+  arrange(ID, rel_day)
+
+# Model
+cv_model_update <- brm(
+  formula = risk_score_model$formula,
+  data = transform_pca(cv_data_update_train, list(cv_data_update_train), significant_features)[[1]],
+  family = cumulative(link = "cloglog", threshold = "flexible"),
+  chains = 4, inits = 0,
+  prior = prior_multivar,
+  file = "models/performance/cv_model_update", file_refit = "on_change"
+)
+```
+
+Fixed risk score model (without updating)
+```{r}
+# Train
+cv_data_noupdate_train <- cv_data_update_train %>%
+  group_by(ID) %>%
+  filter(min(rel_day) == 1) %>%
+  mutate(across(all_of(significant_features), ~ .[1])) %>%
+  ungroup()
+
+# Test
+cv_data_noupdate_test <- cv_data_update_test %>%
+  group_by(ID) %>%
+  mutate(across(all_of(significant_features), ~ .[1])) %>%
+  ungroup()
+
+# Model
+cv_model_noupdate <- brm(
+  formula = event ~ 1 + (1 | ID) + rel_day + age + sex + PC1 + PC11 + PC12 + PC13 + PC17 + PC18 + PC20 + PC21 + PC3,
+  data = transform_pca(cv_data_noupdate_train, list(cv_data_noupdate_train), significant_features)[[1]],
+  family = cumulative(link = "cloglog", threshold = "flexible"),
+  chains = 4, inits = 0,
+  prior = prior_multivar,
+  file = "models/performance/cv_model_noupdate", file_refit = "on_change"
+)
+```
+
+"NUll model" risk score with demographics only
+```{r}
+# Here, train and test data can be the same as for the main model (but only demographic features will be used by the null model)
+
+# Model
+cv_model_demographics_only <- brm(
+  formula = event ~ 1 + (1 | ID) + rel_day + age + sex,
+  data = transform_pca(cv_data_update_train, list(cv_data_update_train), significant_features)[[1]],
+  family = cumulative(link = "cloglog", threshold = "flexible"),
+  chains = 4, inits = 0,
+  prior = prior(normal(0, 1), class = "b") + prior(normal(0, 5), class = "Intercept") + prior(normal(0, 1), class = "b", coef = "rel_day") + prior(normal(0, 0.1), class = "sd", group = "ID"),
+  file = "models/performance/cv_model_demographics_only", file_refit = "on_change"
+)
+```
+
+## Leave-One-Subject-Out CV
+
+Main risk score model (with updating)
+```{r}
+kf_pred_update <- kfold_manual(
+  cvmodel = cv_model_update,
+  n_folds = length(unique(cv_data_update_test$ID)),
+  pca_features = significant_features,
+  data_training = cv_data_update_train,
+  data_test = cv_data_update_test
+)
+
+saveRDS(kf_pred_update, file = "models/performance/results/cv_model_update_kfpred.rds")
+beep("coin")
+```
+
+Fixed risk score model (without updating)
+```{r}
+kf_pred_noupdate <- kfold_manual(
+  cvmodel = cv_model_noupdate,
+  n_folds = length(unique(cv_data_noupdate_test$ID)),
+  pca_features = significant_features,
+  data_training = cv_data_noupdate_train,
+  data_test = cv_data_noupdate_test
+)
+
+saveRDS(kf_pred_noupdate, file = "models/performance/results/cv_model_noupdate_kfpred.rds")
+beep("coin")
+```
+
+"NUll model" risk score with demographics only
+```{r}
+kf_pred_demographics_only <- kfold_manual(
+  cvmodel = cv_model_demographics_only,
+  n_folds = length(unique(cv_data_update_test$ID)),
+  pca_features = significant_features,
+  data_training = cv_data_update_train,
+  data_test = cv_data_update_test
+)
+
+saveRDS(kf_pred_demographics_only, file = "models/performance/results/cv_model_demographics_only_kfpred.rds")
+beep("coin")
+```
+
+
+## Time-dependent AUROC
+
+Load cross-validation results
+```{r}
+kf_pred_update <- readRDS("models/performance/results/cv_model_update_kfpred.rds")
+kf_pred_noupdate <- readRDS("models/performance/results/cv_model_noupdate_kfpred.rds")
+kf_pred_demographics_only <- readRDS("models/performance/results/cv_model_demographics_only_kfpred.rds")
+```
+
+Compute time-dependent AUROC for each risk score model
+```{r, warning=F}
+# Main risk score model (with updating)
+AUC_stat_noupdate <- kf_pred_noupdate %>%
+  group_by(ID, rel_day, event) %>%
+  summarize(dismiss = mean(dismiss), stay = mean(stay), icu = mean(icu), .groups = "drop") %>%
+  arrange(ID, rel_day) %>%
+  group_by(ID) %>%
+  mutate(tstart = rel_day - 1, tstop = ifelse(is.na(lead(tstart)), rel_day, lead(tstart))) %>%
+  mutate(event = case_when(event == "stay" ~ 0, event == "dismiss" ~ 1, event == "icu" ~ 2)) %>%
+  get_AUC_statistics(max_time = 7)
+
+# Fixed risk score model (without updating)
+AUC_stat_update <- kf_pred_update %>%
+  group_by(ID, rel_day, event) %>%
+  summarize(dismiss = mean(dismiss), stay = mean(stay), icu = mean(icu), .groups = "drop") %>%
+  arrange(ID, rel_day) %>%
+  group_by(ID) %>%
+  mutate(tstart = rel_day - 1, tstop = ifelse(is.na(lead(tstart)), rel_day, lead(tstart))) %>%
+  mutate(event = case_when(event == "stay" ~ 0, event == "dismiss" ~ 1, event == "icu" ~ 2)) %>%
+  get_AUC_statistics(max_time = 7)
+
+# "NUll model" risk score with demographics only
+AUC_stat_demographics_only <- kf_pred_demographics_only %>%
+  group_by(ID, rel_day, event) %>%
+  summarize(dismiss = mean(dismiss), stay = mean(stay), icu = mean(icu), .groups = "drop") %>%
+  arrange(ID, rel_day) %>%
+  group_by(ID) %>%
+  mutate(tstart = rel_day - 1, tstop = ifelse(is.na(lead(tstart)), rel_day, lead(tstart))) %>%
+  mutate(event = case_when(event == "stay" ~ 0, event == "dismiss" ~ 1, event == "icu" ~ 2)) %>%
+  get_AUC_statistics(max_time = 7)
+```
+
+Figure 5
+```{r}
+plot_auc_multi(AUC_stat_update[["dismiss"]], "Main (with daily update)", AUC_stat_noupdate[["dismiss"]], "Fixed (without update)")
+ggsave("figures/performance_AUC.png", height = 9.26, width = 15, units = "cm", dpi = 300)
+```
+
+Figure 16 (Multimedia Appendix)
+```{r,fig.eight=4.5,fig.width=7.29}
+plot_auc_multi(AUC_stat_update[["dismiss"]], "Main (with daily update)", AUC_stat_demographics_only[["dismiss"]], "Only demographics", color2 = "#ff5c33ff", fill2 = "#ff5c3333")
+ggsave("figures/performance_AUC_demographics.png", height = 9.26, width = 15, units = "cm", dpi = 300)
+```
