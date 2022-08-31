@@ -1,0 +1,140 @@
+---
+title: "Model diagnostics"
+author: "Adrian Lison"
+---
+
+# Preparation
+```{r, message=F}
+knitr::purl("preprocessing/preparation.Rmd", "preprocessing/preparation.R")
+source("preprocessing/preparation.R")
+```
+
+Models from explanatory analysis
+```{r}
+predictors <-
+  surv_data %>%
+  select(
+    starts_with(c("HEART_RATE", "RESPIRATION")) & ends_with(c("_max", "_mean", "_min", "_rms", "pct_95", "pct_5", "_iqr", "_iqr_5_95", "_std", "_entropy", "_n_above_mean", "_n_below_mean", "_energy")),
+    "hrv_mean_nni", "hrv_median_nni", "hrv_range_nni", "hrv_sdsd", "hrv_rmssd", "hrv_nni_50", "hrv_pnni_50", "hrv_nni_20", "hrv_pnni_20", "hrv_cvsd", "hrv_sdnn", "hrv_cvnni", "hrv_total_power", "hrv_vlf", "hrv_lf", "hrv_hf", "hrv_lf_hf_ratio", "hrv_lfnu", "hrv_hfnu"
+  ) %>%
+  names()
+
+model_list <- sapply(predictors, function(predictor) {
+  if (file.exists(paste0("models/main/explanatory_", predictor, ".rds"))) {
+    model <- readRDS(paste0("models/main/explanatory_", predictor, ".rds"))
+    return(model)
+  } else {
+    print(paste(predictor, "does not exist."))
+    return(NULL)
+  }
+}, simplify = F, USE.NAMES = TRUE)
+```
+
+Risk score models
+```{r}
+predictors_pca <- paste0("PC", 1:21)
+
+model_list[["pca_model"]] <- readRDS("models/main/risk_score.rds")
+```
+
+# Posterior predictive ability
+```{r,fig.width=8,fig.height=3}
+ppplot <- pp_check(model_list[[1]], nsamples = 100, type = "bars", prob = 0.95, freq = F)
+
+ppplot_raw_list <- lapply(model_list[c("HEART_RATE_mean", "hrv_rmssd", "RESPIRATION_mean")], function(model) pp_check(model, nsamples = 1000, type = "bars", prob = 0.95, freq = F))
+
+make_final_ppplot <- function(ppplot) {
+  (delete_layers(ppplot, "GeomBar") +
+    geom_bar(
+      data = ppplot$layers[[1]]$data %>% group_by(y) %>% summarize(ycount = n(), .groups = "drop") %>% mutate(yprop = ycount / sum(ycount), ycolor = factor(y)),
+      aes(x = y, y = yprop, fill = ycolor), stat = "identity"
+    ) +
+    scale_x_continuous(breaks = 1:3, labels = c("Hospital\ndischarge", "Continued\nstay", "ICU\nadmission")) +
+    scale_color_manual(values = "black", name = "") +
+    scale_fill_manual(name = "", values = c(discharge_color, "grey", icu_color)) +
+    scale_y_continuous(labels = scales::percent, expand = expansion(add = c(0, 0.05))) +
+    ylab("Prop. of observations") +
+    theme(legend.position = "None", axis.text.x = element_text(size = 6), plot.background = element_rect(fill = "white", color = NA))) %>%
+    move_layers("GeomPointrange", position = "top") %>%
+    return()
+}
+
+ppplotlist <- lapply(ppplot_raw_list, make_final_ppplot)
+plot_grid(plotlist = ppplotlist, labels = letters[1:4], ncol = 3) +
+  draw_label(expression(Mean ~ HR[]), x = 0.13, y = 0.99, vjust = 1, hjust = 0, size = 12, fontfamily = "Times New Roman") +
+  draw_label(expression(HRV ~ RMSSD[]), x = 0.46, y = 0.99, vjust = 1, hjust = 0, size = 12, fontfamily = "Times New Roman") +
+  draw_label(expression(Mean ~ RF[]), x = 0.79, y = 0.99, vjust = 1, hjust = 0, size = 12, fontfamily = "Times New Roman")
+
+ggsave("figures/pp_checks.png", height = 5.6, width = 15, units = "cm", dpi = 300)
+```
+
+# Rhat
+```{r}
+rhats <- bind_rows(lapply(names(model_list), function(model_name) {
+  data.frame(rhat = rhat(model_list[[model_name]])) %>%
+    rownames_to_column() %>%
+    mutate(model = model_name)
+})) %>% mutate(feature_class = str_extract(model, "(HEART_RATE)|(RESPIRATION)|(hrv)|(pca)"))
+```
+
+```{r}
+params <- c("b_Intercept[2]", "b_Intercept[1]", "b_rel_day", "b_age", "b_sexmale")
+
+rhats %>%
+  filter((rowname %in% params) | (rowname %in% paste0("b_", c(predictors, predictors_pca)))) %>%
+  mutate(rowname = ifelse(rowname %in% paste0("b_", predictors), "theta", rowname)) %>%
+  mutate(rowname = ifelse(rowname %in% paste0("b_", predictors_pca), "theta", rowname)) %>%
+  mutate(
+    rowname = factor(rowname, ordered = T, levels = c(params, "theta")),
+    feature_class = factor(feature_class, ordered = T, level = c("HEART_RATE", "hrv", "RESPIRATION", "pca"))
+  ) %>%
+  ggplot(aes(y = rowname, x = rhat)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = feature_class), width = 0, height = 0.3) +
+  geom_vline(xintercept = 1.01, linetype = "dashed") +
+  theme_bw() +
+  ylab("Parameter") +
+  xlab(expression(paste("Gelman-Rubin diagnostic ", hat(R)))) +
+  scale_color_npg(name = "Model", labels = expression(HR[], HRV[], RF[], Risk ~ score[])) +
+  scale_y_discrete(labels = c(expression(tau[2]), expression(tau[1]), expression(beta[]), expression(delta^age), expression(delta^sex), expression(theta))) +
+  theme(legend.position = "top", axis.text.y = element_text(size = 12), text = element_text(family = "Times New Roman")) +
+  guides(color = guide_legend(title.vjust = 0.65))
+
+ggsave("figures/diagnostics_rhat.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
+
+# Effective sample size ratio
+```{r}
+neffs <- bind_rows(lapply(names(model_list), function(model_name) {
+  data.frame(neff = neff_ratio(model_list[[model_name]])) %>%
+    rownames_to_column() %>%
+    mutate(model = model_name)
+})) %>% mutate(feature_class = str_extract(model, "(HEART_RATE)|(RESPIRATION)|(hrv)|(pca)"))
+```
+
+```{r}
+params <- c("b_Intercept[2]", "b_Intercept[1]", "b_rel_day", "b_age", "b_sexmale")
+
+neffs %>%
+  filter((rowname %in% params) | (rowname %in% paste0("b_", c(predictors, predictors_pca)))) %>%
+  mutate(rowname = ifelse(rowname %in% paste0("b_", predictors), "theta", rowname)) %>%
+  mutate(rowname = ifelse(rowname %in% paste0("b_", predictors_pca), "theta", rowname)) %>%
+  mutate(
+    rowname = factor(rowname, ordered = T, levels = c(params, "theta")),
+    feature_class = factor(feature_class, ordered = T, level = c("HEART_RATE", "hrv", "RESPIRATION", "pca"))
+  ) %>%
+  ggplot(aes(y = rowname, x = neff)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = feature_class), width = 0, height = 0.3) +
+  geom_vline(xintercept = 0.1, linetype = "dashed") +
+  theme_bw() +
+  ylab("Parameter") +
+  xlab("Effective sample size ratio") +
+  scale_color_npg(name = "Model", labels = expression(HR[], HRV[], RF[], Risk ~ score[])) +
+  scale_x_continuous(breaks = seq(0.1, 1.3, 0.3), limits = c(0.1, 1.2)) +
+  scale_y_discrete(labels = c(expression(tau[2]), expression(tau[1]), expression(beta[]), expression(delta^age), expression(delta^sex), expression(theta))) +
+  theme(legend.position = "top", axis.text.y = element_text(size = 12), text = element_text(family = "Times New Roman")) +
+  guides(color = guide_legend(title.vjust = 0.65))
+
+ggsave("figures/diagnostics_neff.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
