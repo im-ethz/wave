@@ -1,0 +1,373 @@
+---
+title: "Robustness checks"
+author: "Adrian Lison"
+---
+
+# Preparation
+```{r, message=F}
+knitr::purl("preprocessing/preparation.Rmd", "preprocessing/preparation.R")
+source("preprocessing/preparation.R")
+
+knitr::purl("preprocessing/preparation_robustness.Rmd", "preprocessing/preparation_robustness.R")
+source("preprocessing/preparation_robustness.R")
+
+predictors <- c("HEART_RATE_mean", "RESPIRATION_mean", "hrv_rmssd")
+```
+
+# Fitting
+```{r}
+model_list <- list()
+```
+
+## Main model
+```{r}
+formula_main <- function(predictor) as.formula(paste("event ~ 1 + (1 | ID) + rel_day + age + sex +", predictor))
+data_main <- surv_data
+family_main <- cumulative(link = "cloglog", threshold = "flexible")
+prior_main <- prior(normal(0, 1), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "rel_day") +
+  prior(student_t(3, 0, 1), class = "sd", group = "ID")
+controls_main <- list(adapt_delta = 0.9)
+
+model_list[["Main"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/main_", predictor),
+    file_refit = "on_change"
+  ))
+}, simplify = FALSE, USE.NAMES = TRUE)
+```
+
+## Different distribution function
+```{r}
+model_list[["Main: Extreme value"]] <- model_list[["Main"]]
+```
+
+```{r}
+model_list[["Logistic"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = cumulative(link = "logit", threshold = "flexible"),
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/logit_", predictor),
+    file_refit = "on_change"
+  ))
+}, simplify = FALSE, USE.NAMES = TRUE)
+```
+
+```{r}
+model_list[["Normal"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = cumulative(link = "probit", threshold = "flexible"),
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/probit_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## Wider prior
+
+```{r}
+model_list[["Main: Standard prior"]] <- model_list[["Main"]]
+```
+
+```{r}
+prior_wide <- prior(normal(0, 2), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "rel_day") +
+  prior(student_t(3, 0, 1), class = "sd", group = "ID")
+
+model_list[["Wider prior\n(standard deviation doubled)"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_wide,
+    control = controls_main,
+    file = paste0("models/robustness/wider_prior_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## No control for demographics
+```{r}
+formula_no_demographics <- function(predictor) as.formula(paste("event ~ 1 + (1 | ID) + rel_day + ", predictor))
+
+model_list[["No demographics"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_no_demographics(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/no_demographics_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## No subject random effect
+```{r}
+formula_no_subject_RE_effect <- function(predictor) as.formula(paste("event ~ 1 + rel_day + age + sex +", predictor))
+prior_no_subject_RE_effect <- prior(normal(0, 1), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "rel_day")
+
+model_list[["No subject RE"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_no_subject_RE_effect(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_no_subject_RE_effect,
+    control = controls_main,
+    file = paste0("models/robustness/no_subject_RE_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## Neither subject random effect nor control for demographics
+```{r}
+formula_no_subject_RE_effect_no_demographics <- function(predictor) as.formula(paste("event ~ 1 + rel_day +", predictor))
+prior_no_subject_RE_effect_no_demographics <- prior(normal(0, 1), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "rel_day")
+
+model_list[["No subject RE,\n no demographics"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_no_subject_RE_effect_no_demographics(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_no_subject_RE_effect_no_demographics,
+    control = controls_main,
+    file = paste0("models/robustness/no_subject_RE_no_demographics", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## Different time window
+```{r}
+model_list[["Main: 0:00-5:00h"]] <- model_list[["Main"]]
+
+model_list[["0:00-4:00h"]] <- sapply(predictors, function(predictor) {
+  data_model <- surv_data_tw4 %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/time_window2_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+
+model_list[["0:00-6:00h"]] <- sapply(predictors, function(predictor) {
+  data_model <- surv_data_tw6 %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/time_window_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+
+
+model_list[["Full day"]] <- sapply(predictors, function(predictor) {
+  data_model <- surv_data_fullday %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_main(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/time_window_full_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+## Different modeling of day effect
+
+```{r}
+model_list[["Main: Linear"]] <- model_list[["Main"]]
+```
+
+Quadratic time trend
+```{r}
+formula_quadratic <- function(predictor) as.formula(paste("event ~ 1 + (1 | ID) + rel_day + I(rel_day^2) + age + sex +", predictor))
+
+model_list[["Quadratic"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_quadratic(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_main,
+    control = controls_main,
+    file = paste0("models/robustness/quadratic_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+Spline
+```{r}
+formula_spline <- function(predictor) as.formula(paste("event ~ 1 + (1 | ID) + s(rel_day, bs='tp') + age + sex +", predictor))
+prior_spline <- prior(normal(0, 1), class = "b") +
+  prior(normal(0, 5), class = "Intercept") +
+  prior(student_t(3, 0, 1), class = "sd", group = "ID")
+
+model_list[["Smoothing spline"]] <- sapply(predictors, function(predictor) {
+  data_model <- data_main %>%
+    ensure_quality_observations(predictor, observation_coverage, coverage_factor) %>%
+    mutate(rel_day = scale(rel_day))
+
+  return(brm(formula_spline(predictor),
+    data = data_model,
+    family = family_main,
+    prior = prior_spline,
+    control = controls_main,
+    file = paste0("models/robustness/spline_", predictor),
+    file_refit = "on_change"
+  ))
+},
+simplify = FALSE, USE.NAMES = TRUE
+)
+```
+
+# Results
+```{r}
+all_draws <- bind_rows(lapply(names(model_list), function(model_name) {
+  bind_rows(lapply(names(model_list[[model_name]]), function(predictor_name) {
+    model_list[[model_name]][[predictor_name]] %>%
+      gather_draws(!!as.name(paste0("b_", predictor_name)), regex = T) %>%
+      mutate(model = model_name, feature = predictor_name)
+  }))
+})) %>% mutate(model = factor(model, ordered = T, levels = rev(names(model_list))))
+```
+
+```{r}
+plot_robustness <- function(df) {
+  df %>%
+    mutate(feature = factor(feature, ordered = T, levels = c("HEART_RATE_mean", "hrv_rmssd", "RESPIRATION_mean"))) %>%
+    ggplot(aes(y = model, x = -.value, color = feature)) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    stat_pointinterval(position = position_dodge(width = 0.3), .width = c(0.8, 0.95), fill = "white", shape = 21, point_interval = mean_qi) +
+    theme_bw() +
+    xlab("Standardized coefficient") +
+    ylab("Model") +
+    scale_color_discrete(name = "Physiological feature", labels = expression(Mean ~ HR[], HRV ~ RMSSD[], Mean ~ RF[])) +
+    theme(legend.position = "top", text = element_text(family = "Times New Roman")) +
+    guides(color = guide_legend(nrow = 1, label.vjust = 0.5)) +
+    coord_cartesian(xlim = c(-1.5, 1.5))
+}
+```
+
+## Distribution functions
+```{r}
+all_draws %>%
+  filter(model %in% c("Main: Extreme value", "Logistic", "Normal")) %>%
+  plot_robustness()
+
+ggsave("figures/robustness_distr.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
+
+## Priors
+```{r}
+all_draws %>%
+  filter(model %in% c("Main: Standard prior", "Wider prior\n(standard deviation doubled)")) %>%
+  plot_robustness()
+
+ggsave("figures/robustness_prior.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
+
+## Controls
+```{r}
+all_draws %>%
+  filter(model %in% c("Main", "No demographics", "No subject RE", "No subject RE,\n no demographics")) %>%
+  plot_robustness()
+
+ggsave("figures/robustness_controls.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
+
+## Time window
+```{r}
+all_draws %>%
+  filter(model %in% c("Main: 0:00-5:00h", "0:00-4:00h", "0:00-6:00h", "Full day")) %>%
+  plot_robustness() + scale_y_discrete(labels = rev(c("Main: 0:00 to 5:00h", "0:00 to 4:00h", "0:00 to 6:00h", "5:00-1d to 5:00h")))
+
+ggsave("figures/robustness_time_windows.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
+
+## Day effect
+```{r}
+all_draws %>%
+  filter(model %in% c("Main: Linear", "Quadratic", "Smoothing spline")) %>%
+  plot_robustness()
+
+ggsave("figures/robustness_day_effect.png", height = 9, width = 15, units = "cm", dpi = 300)
+```
